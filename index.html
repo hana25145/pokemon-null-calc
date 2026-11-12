@@ -163,6 +163,8 @@ img.spr.sm{display:inline-block;width:24px;height:24px;vertical-align:middle;mar
 .odd.sw .bar>i{background:var(--ai)}
 .odd .ds{grid-column:1/-1;font-size:9px;color:var(--muted)}
 .subh{font-weight:bold;margin:8px 0 4px;padding-top:6px;border-top:1px solid var(--line-soft)}
+.nextmode{display:flex;gap:4px;align-items:center;margin-bottom:2px}
+.nextmode select{flex:1;min-width:0}
 details.st summary{cursor:pointer;font-weight:bold;margin-top:8px}
 .togs{display:grid;grid-template-columns:1fr;gap:2px;margin-top:4px}
 .togs label{display:flex;gap:4px;align-items:center}
@@ -304,7 +306,7 @@ const S = {
      plConfused:false,plInfatuated:false,plSeeded:false,aiSeeded:false,plTrapped:false,aiTrapped:false,plPerish:false,aiPerishFaint:false,
      aiConfused:false,aiYawn:false,plYawn:false,aiSub:false,plSub:false,plLastMon:false,aiCursed:false,plCursed:false,
      aiDisguise:true,speedOverride:'auto',aiUnburden:false,plUnburden:false,futureSightOnPl:false,aiDefCurled:false,
-     aiWrapped:false,plWrapped:false,aiBerryEaten:false,aiAboutToFaint:false,plRecharging:false},
+     aiWrapped:false,plWrapped:false,aiBerryEaten:false,aiAboutToFaint:false,plRecharging:false,nextImmediate:false},
   sims:4000
 };
 
@@ -1073,23 +1075,30 @@ function scoreAll(ctx){
 }
 
 /* ---------------- switching ---------------- */
-function switchInScores(ctx, candidates){
-  // returns per-candidate scores using random rolls (one sample)
+function switchInScores(ctx, candidates, immediate){
+  // returns per-candidate scores using random rolls (one sample).
+  // immediate: the switch-in gets hit right away (mid-turn switch, AI's fast U-turn/Volt Switch, Eject Pack/Button)
   return candidates.map(c => {
-    if (c.special != null) return c.special;
     const cd = Math.max(0, ...c.aiMoves.filter(m => !m.status && !NEVER_HDM.has(m.name) && m.usable > 0).map(m => m.rolls[(Math.random() * 16) | 0]));
     const pd = Math.max(0, ...c.plMoves.filter(m => !m.status && m.usable > 0).map(m => m.rolls[(Math.random() * 16) | 0]));
     const cHits = hitsToKill(ctx.plHP, cd, ctx.plSash);
     const pHits = hitsToKill(c.hp, pd, c.sash);
     let s;
-    if (c.faster && cHits === 1) s = 5;
-    else if (!c.faster && cHits === 1) s = 4;
-    else if (c.faster && cHits <= pHits && cHits < Infinity) s = 3;
-    else if (!c.faster && cHits < pHits) s = 2;
-    else if (c.faster) s = 1;
-    else if (pHits === 1) s = -1;
-    else s = 0;
-    if (c.support && s !== -1 && R(.1)) s += 2;
+    if (c.special != null) s = c.special;
+    else {
+      if (c.faster && cHits === 1) s = 5;
+      else if (!c.faster && cHits === 1) s = 4;
+      else if (c.faster && cHits <= pHits && cHits < Infinity) s = 3;
+      else if (!c.faster && cHits < pHits) s = 2;
+      else if (c.faster) s = 1;
+      else if (pHits === 1) s = -1;
+      else s = 0;
+      if (c.support && s !== -1 && R(.1)) s += 2;
+    }
+    if (immediate && !c.mon.hasAbility('Imposter')) {
+      if (pHits === 1) s -= 2;                      // OHKO'd on entry
+      else if (!c.faster && pHits === 2) s -= 1;    // slower and 2HKO'd
+    }
     return s;
   });
 }
@@ -1181,12 +1190,13 @@ function simulate(){
   const sw = midTurnSwitch(ctx, cands);
   let swTo = new Map(), swValid = 0, postKO = new Map(), postScores = cands.map(() => new Map());
   for (let it = 0; it < 2000 && cands.length; it++) {
-    const sc = switchInScores(ctx, cands);
-    // post-KO: highest score, ties -> party order
-    let bi = 0; sc.forEach((s, i) => { if (s > sc[bi]) bi = i; });
+    // next Pokémon: after a faint the newcomer isn't hit at once; after the AI's fast pivot / Eject Pack it is
+    const pk = switchInScores(ctx, cands, S.b.nextImmediate);
+    let bi = 0; pk.forEach((s, i) => { if (s > pk[bi]) bi = i; });   // ties -> party order
     postKO.set(bi, (postKO.get(bi) || 0) + 1);
-    sc.forEach((s, i) => postScores[i].set(s, (postScores[i].get(s) || 0) + 1));
-    // mid-turn: needs a non-negative candidate unless Anti-Setup Plus
+    pk.forEach((s, i) => postScores[i].set(s, (postScores[i].get(s) || 0) + 1));
+    // mid-turn switch: the newcomer takes the player's attack this turn; needs a non-negative candidate unless Anti-Setup Plus
+    const sc = switchInScores(ctx, cands, true);
     const best = Math.max(...sc);
     if (best >= 0 || sw.anyNeg) {
       swValid++;
@@ -1500,7 +1510,12 @@ function aiPanel(r){
       <div class="odds">${rows.map(({m, p, i}) => `<div class="odd"><span class="nm">${esc(m.display)}</span><span class="pc">${(p * 100).toFixed(1)}%</span><span class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></span><span class="ds">점수 ${dist(r.hist[i])}${r.killCount[i] ? ` · 킬 ${(r.killCount[i] / r.N * 100).toFixed(0)}%` : ''}</span></div>`).join('')}
       ${r.pSwitch > 0.0005 ? `<div class="odd sw"><span class="nm">교체 → ${esc([...r.swTo.entries()].sort((a, b) => b[1] - a[1]).map(([ci, c]) => `${r.cands[ci].set.species} ${(c / r.swValid * 100).toFixed(0)}%`).join(', '))}</span><span class="pc">${(r.pSwitch * 100).toFixed(1)}%</span><span class="bar"><i style="width:${(r.pSwitch * 100).toFixed(1)}%"></i></span><span class="ds">${esc(r.sw.reason)}</span></div>` : ''}</div>
       <p class="note">교체 판정: ${esc(r.sw.reason)}${r.sw.p > 0 && r.pSwitch === 0 ? ' (점수 0 이상인 교체 대상이 없어 교체 안 함)' : ''}</p>
-      <div class="subh">쓰러뜨리면 다음에 나올 포켓몬</div>
+      <div class="subh">다음에 나올 포켓몬</div>
+      <label class="nextmode">상황 <select id="st-nextImmediate" data-act="bsel" data-k="nextImmediate">
+        <option value="" ${S.b.nextImmediate ? '' : 'selected'}>지금 포켓몬이 쓰러진 뒤</option>
+        <option value="1" ${S.b.nextImmediate ? 'selected' : ''}>AI의 빠른 유턴·볼트체인지 / 탈출팩·탈출버튼 (바로 맞음)</option>
+      </select></label>
+      <p class="note" style="margin:2px 0 6px">바로 맞는 상황이면 1타 −2, 느린데 2타 −1 감점. 턴 중간 교체는 항상 이 감점을 적용합니다.</p>
       ${r.cands.length ? `<div class="odds">${r.cands.map((c, i) => ({c, p:(r.postKO.get(i) || 0) / r.iters, sc:r.postScores[i]})).sort((a, b) => b.p - a.p).map(({c, p, sc}) => `<div class="odd sw"><span class="nm">${sprImg(spriteFor(c.set), 'sm')}${esc(c.set.species)}</span><span class="pc">${(p * 100).toFixed(1)}%</span><span class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></span><span class="ds">점수 ${[...sc.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([s, n]) => `${s > 0 ? '+' + s : s}: ${(n / r.iters * 100).toFixed(0)}%`).join(' · ')} · Spe ${c.spe}</span></div>`).join('')}</div>` : '<p class="muted">남은 포켓몬 없음</p>'}`;
   }
   const b = S.b;
